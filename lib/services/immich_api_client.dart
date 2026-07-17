@@ -101,7 +101,9 @@ class UploadedAsset {
 }
 
 /// Minimal asset metadata returned by Immich's list endpoint, used by the
-/// dashboard to compute per-device totals and last-sync timestamps (FR-6).
+/// dashboard to compute per-device totals and last-sync timestamps (FR-6),
+/// and by the backup verifier to compare server-stored checksums against
+/// local files (FR-7, Phase 6).
 class ImmichAsset {
   final String id;
   final String deviceId;
@@ -109,12 +111,17 @@ class ImmichAsset {
   final DateTime modifiedAt;
   final bool isFavorite;
 
+  /// Server-stored SHA-256 checksum as base64, or null when Immich omits the
+  /// field. Used by the backup verifier (FR-7).
+  final String? checksumBase64;
+
   const ImmichAsset({
     required this.id,
     required this.deviceId,
     required this.createdAt,
     required this.modifiedAt,
     required this.isFavorite,
+    this.checksumBase64,
   });
 
   factory ImmichAsset.fromJson(Map<String, dynamic> json) {
@@ -124,6 +131,7 @@ class ImmichAsset {
       createdAt: DateTime.parse(json['fileCreatedAt'] as String),
       modifiedAt: DateTime.parse(json['fileModifiedAt'] as String),
       isFavorite: (json['isFavorite'] as bool?) ?? false,
+      checksumBase64: json['checksum'] as String?,
     );
   }
 }

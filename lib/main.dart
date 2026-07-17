@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'services/auth_store.dart';
+import 'services/backup_verifier.dart';
 import 'services/connectivity_monitor.dart';
 import 'services/device_registry.dart';
 import 'services/immich_api_client.dart';
@@ -13,6 +14,7 @@ import 'screens/dashboard_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/space_saver_screen.dart';
+import 'screens/verification_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,6 +37,7 @@ class _AnhNhaAppState extends State<AnhNhaApp> {
   late final QueueNotifier _notifier;
   late final SyncEngine _syncEngine;
   late final DeviceRegistry _deviceRegistry;
+  late final BackupVerifier _backupVerifier;
   bool _restoredSession = false;
 
   @override
@@ -47,6 +50,7 @@ class _AnhNhaAppState extends State<AnhNhaApp> {
     _tailscale = TailscaleMonitor();
     _notifier = QueueNotifier();
     _deviceRegistry = DeviceRegistry(_apiClient, _queueDb);
+    _backupVerifier = BackupVerifier(_apiClient, _queueDb);
     _syncEngine = SyncEngine(
       apiClient: _apiClient,
       authStore: _authStore,
@@ -119,6 +123,10 @@ class _AnhNhaAppState extends State<AnhNhaApp> {
               tailscale: _tailscale,
             ),
         '/space-saver': (context) => SpaceSaverScreen(queueDb: _queueDb),
+        '/verification': (context) => VerificationScreen(
+              verifier: _backupVerifier,
+              queueDb: _queueDb,
+            ),
         '/dashboard': (context) => DashboardScreen(
               deviceRegistry: _deviceRegistry,
               queueDb: _queueDb,

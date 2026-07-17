@@ -102,6 +102,11 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () => Navigator.of(context).pushNamed('/space-saver'),
           ),
           IconButton(
+            icon: const Icon(Icons.fact_check),
+            tooltip: 'Backup verification',
+            onPressed: () => Navigator.of(context).pushNamed('/verification'),
+          ),
+          IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Log out',
             onPressed: _logout,

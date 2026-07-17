@@ -264,6 +264,83 @@ class QueueStats {
   }
 }
 
+/// Outcome of a single backup-verification check (FR-7, Phase 6).
+enum VerifyStatus { match, mismatch, localMissing, serverMissing, error }
+
+/// Extension methods to convert between the integer code stored in the DB
+/// and the typed [VerifyStatus] enum.
+extension VerifyStatusCode on VerifyStatus {
+  int get code => switch (this) {
+        VerifyStatus.match => 0,
+        VerifyStatus.mismatch => 1,
+        VerifyStatus.localMissing => 2,
+        VerifyStatus.serverMissing => 3,
+        VerifyStatus.error => 4,
+      };
+
+  static VerifyStatus fromCode(int code) => switch (code) {
+        0 => VerifyStatus.match,
+        1 => VerifyStatus.mismatch,
+        2 => VerifyStatus.localMissing,
+        3 => VerifyStatus.serverMissing,
+        _ => VerifyStatus.error,
+      };
+}
+
+/// Persistent record of a single backup-verification check (FR-7).
+///
+/// Each row records the outcome of one verification pass over a single
+/// synced asset: the locally recomputed SHA-256 checksum, the server's
+/// stored checksum, the comparison status, and when the check ran.
+class VerificationResult {
+  final int? id;
+  final String localId;
+  final String? serverAssetId;
+  final String filename;
+  final String localChecksumBase64;
+  final String? serverChecksumBase64;
+  final VerifyStatus status;
+  final DateTime checkedAt;
+
+  const VerificationResult({
+    this.id,
+    required this.localId,
+    this.serverAssetId,
+    required this.filename,
+    required this.localChecksumBase64,
+    this.serverChecksumBase64,
+    required this.status,
+    required this.checkedAt,
+  });
+
+  factory VerificationResult.fromRow(Map<String, Object?> row) {
+    return VerificationResult(
+      id: row['id'] as int?,
+      localId: row['local_id'] as String,
+      serverAssetId: row['server_asset_id'] as String?,
+      filename: row['filename'] as String,
+      localChecksumBase64: row['local_checksum_base64'] as String,
+      serverChecksumBase64: row['server_checksum_base64'] as String?,
+      status: VerifyStatusCode.fromCode(row['status'] as int),
+      checkedAt:
+          DateTime.fromMillisecondsSinceEpoch(row['checked_at'] as int),
+    );
+  }
+
+  Map<String, Object?> toRow() {
+    return {
+      if (id != null) 'id': id,
+      'local_id': localId,
+      'server_asset_id': serverAssetId,
+      'filename': filename,
+      'local_checksum_base64': localChecksumBase64,
+      'server_checksum_base64': serverChecksumBase64,
+      'status': status.code,
+      'checked_at': checkedAt.millisecondsSinceEpoch,
+    };
+  }
+}
+
 /// Per-device statistics tracked locally for the dashboard (FR-6).
 ///
 /// Each row represents the last-known stats for a single device that has
@@ -338,7 +415,7 @@ class DeviceStats {
 /// DB stays small even with thousands of queued photos.
 class SyncQueueDb {
   static const _dbName = 'anh_nha_queue.db';
-  static const _schemaVersion = 3;
+  static const _schemaVersion = 4;
 
   Database? _db;
 
@@ -360,6 +437,7 @@ class SyncQueueDb {
     await _createQueueTable(db);
     await _createSyncedAssetsTable(db);
     await _createDeviceStatsTable(db);
+    await _createVerificationResultsTable(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -368,6 +446,9 @@ class SyncQueueDb {
     }
     if (oldVersion < 3) {
       await _createDeviceStatsTable(db);
+    }
+    if (oldVersion < 4) {
+      await _createVerificationResultsTable(db);
     }
   }
 
@@ -438,6 +519,37 @@ class SyncQueueDb {
         updated_at INTEGER NOT NULL
       )
     ''');
+  }
+
+  /// Table of per-asset backup-verification results (FR-7, Phase 6).
+  ///
+  /// Each row records the outcome of one verification check of a single
+  /// synced asset: the locally recomputed SHA-256 checksum, the server's
+  /// stored checksum (as reported by `GET /api/assets`), the comparison
+  /// outcome, and the timestamp of the check. Rows are keyed by
+  /// `server_asset_id` (or `local_id` when no server id is known) so
+  /// repeated verifications of the same asset update in place rather than
+  /// accumulate.
+  Future<void> _createVerificationResultsTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS verification_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_id TEXT NOT NULL,
+        server_asset_id TEXT,
+        filename TEXT NOT NULL,
+        local_checksum_base64 TEXT NOT NULL,
+        server_checksum_base64 TEXT,
+        status INTEGER NOT NULL,
+        checked_at INTEGER NOT NULL,
+        UNIQUE(server_asset_id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_verify_status ON verification_results(status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_verify_local_id ON verification_results(local_id)',
+    );
   }
 
   Database get _dbRef {
@@ -526,6 +638,7 @@ class SyncQueueDb {
     await _dbRef.delete('queue');
     await _dbRef.delete('synced_assets');
     await _dbRef.delete('device_stats');
+    await _dbRef.delete('verification_results');
   }
 
   /// Aggregate counts by status, surfaced to the UI and foreground
@@ -646,6 +759,71 @@ class SyncQueueDb {
   /// Remove all device stats rows (used by full logout / tests).
   Future<void> clearAllDeviceStats() async {
     await _dbRef.delete('device_stats');
+  }
+
+  // --- Verification results (FR-7, Phase 6) ------------------------------
+
+  /// Upsert a verification result. The row is keyed by `server_asset_id`
+  /// when present, otherwise by `local_id`. Repeated verifications of the
+  /// same asset update the existing row in place rather than accumulate.
+  Future<void> upsertVerificationResult(VerificationResult result) async {
+    await _dbRef.insert(
+      'verification_results',
+      result.toRow(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Bulk-upsert a batch of verification results.
+  Future<void> upsertVerificationResults(
+    List<VerificationResult> results,
+  ) async {
+    if (results.isEmpty) return;
+    final batch = _dbRef.batch();
+    for (final r in results) {
+      batch.insert(
+        'verification_results',
+        r.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  /// Fetch all verification results, ordered most-recently-checked first.
+  Future<List<VerificationResult>> listVerificationResults() async {
+    final rows = await _dbRef.query(
+      'verification_results',
+      orderBy: 'checked_at DESC',
+    );
+    return rows.map(VerificationResult.fromRow).toList();
+  }
+
+  /// Count verification results grouped by status. Returns a map keyed by
+  /// [VerifyStatus]. Used by the verifier UI to render summary cards.
+  Future<Map<VerifyStatus, int>> verificationCounts() async {
+    final rows = await _dbRef.rawQuery(
+      'SELECT status, COUNT(*) AS c FROM verification_results GROUP BY status',
+    );
+    final out = <VerifyStatus, int>{};
+    for (final row in rows) {
+      final code = row['status'] as int;
+      final count = row['c'] as int;
+      out[VerifyStatusCode.fromCode(code)] = count;
+    }
+    return out;
+  }
+
+  /// Total number of verification results recorded.
+  Future<int> verificationTotal() async {
+    final rows = await _dbRef
+        .rawQuery('SELECT COUNT(*) AS c FROM verification_results');
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  /// Remove all verification results (used by logout / tests).
+  Future<void> clearVerificationResults() async {
+    await _dbRef.delete('verification_results');
   }
 
   /// Close the database. Safe to call multiple times.
