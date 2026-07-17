@@ -290,7 +290,7 @@ extension VerifyStatusCode on VerifyStatus {
 /// Persistent record of a single backup-verification check (FR-7).
 ///
 /// Each row records the outcome of one verification pass over a single
-/// synced asset: the locally recomputed SHA-256 checksum, the server's
+/// synced asset: the locally recomputed SHA-1 checksum, the server's
 /// stored checksum, the comparison status, and when the check ran.
 class VerificationResult {
   final int? id;
@@ -415,7 +415,7 @@ class DeviceStats {
 /// DB stays small even with thousands of queued photos.
 class SyncQueueDb {
   static const _dbName = 'anh_nha_queue.db';
-  static const _schemaVersion = 4;
+  static const _schemaVersion = 5;
 
   Database? _db;
 
@@ -449,6 +449,16 @@ class SyncQueueDb {
     }
     if (oldVersion < 4) {
       await _createVerificationResultsTable(db);
+    }
+    if (oldVersion < 5) {
+      // CR-3: checksums were previously computed with SHA-256, but Immich
+      // uses SHA-1. Clear all stored checksums so they get recomputed with
+      // the correct algorithm on the next sync/verify pass. Also drop
+      // synced_assets rows so the space-saver does not offer deletions
+      // justified by a stale (wrong-algorithm) checksum match.
+      await db.execute('UPDATE queue SET checksum_base64 = ""');
+      await db.delete('synced_assets');
+      await db.delete('verification_results');
     }
   }
 
@@ -524,9 +534,9 @@ class SyncQueueDb {
   /// Table of per-asset backup-verification results (FR-7, Phase 6).
   ///
   /// Each row records the outcome of one verification check of a single
-  /// synced asset: the locally recomputed SHA-256 checksum, the server's
-  /// stored checksum (as reported by `GET /api/assets`), the comparison
-  /// outcome, and the timestamp of the check. Rows are keyed by
+  /// synced asset: the locally recomputed SHA-1 checksum, the server's
+  /// stored checksum (as reported by `POST /api/search/metadata`), the
+  /// comparison outcome, and the timestamp of the check. Rows are keyed by
   /// `server_asset_id` (or `local_id` when no server id is known) so
   /// repeated verifications of the same asset update in place rather than
   /// accumulate.

@@ -82,13 +82,13 @@ typedef VerifyProgressCallback = void Function(
 
 /// Backup integrity verifier (FR-7, Phase 6).
 ///
-/// Compares the locally recomputed SHA-256 checksum of every synced asset
+/// Compares the locally recomputed SHA-1 checksum of every synced asset
 /// against the checksum the Immich server has on file. Mismatches are
 /// flagged so the user can re-upload or investigate; missing local files
 /// or missing server entries are reported separately.
 ///
 /// Throughput target: NFR-4 — ≥ 50 photos/minute on a mid-range device.
-/// SHA-256 over a typical 3–5 MB photo is well under a second on modern
+/// SHA-1 over a typical 3–5 MB photo is well under a second on modern
 /// phones, so the bottleneck is the server round-trip, not the hash.
 class BackupVerifier {
   final ImmichApiClient _apiClient;
@@ -115,17 +115,20 @@ class BackupVerifier {
     final synced = await _queueDb.listAllSynced();
 
     // Fetch the server's asset list once and index by serverAssetId so we
-    // avoid one round-trip per photo. Immich's GET /api/assets returns every
-    // asset for the authenticated user with its `checksum` field populated.
+    // avoid one round-trip per photo. Immich's `POST /api/search/metadata`
+    // (paged via [ImmichApiClient.listAssets]) returns every asset for the
+    // authenticated user with its `checksum` field populated.
     final Map<String, ImmichAsset> serverById;
     try {
       final serverAssets = await _apiClient.listAssets();
       serverById = {
         for (final a in serverAssets) a.id: a,
       };
-    } on ImmichApiException {
+    } on Exception {
       // Server unreachable — record an error outcome for every asset so
-      // the UI surfaces the failure rather than silently passing.
+      // the UI surfaces the failure rather than silently passing. Broadened
+      // from `on ImmichApiException` so socket/timeout/HTTP-client errors
+      // also engage the fallback.
       final now = DateTime.now();
       final outcomes = <VerificationResult>[];
       for (final asset in synced) {
@@ -203,7 +206,7 @@ class BackupVerifier {
       );
     }
 
-    // Recompute the local file's SHA-256. If the file is gone (e.g. deleted
+    // Recompute the local file's SHA-1. If the file is gone (e.g. deleted
     // out-of-band), report `localMissing`.
     final file = File(asset.filePath);
     final exists = await file.exists();
@@ -220,7 +223,7 @@ class BackupVerifier {
     String localChecksum;
     try {
       final bytes = await file.readAsBytes();
-      final hash = sha256.convert(bytes);
+      final hash = sha1.convert(bytes);
       localChecksum = base64Encode(hash.bytes);
     } catch (e) {
       return VerifyOutcome(
@@ -272,7 +275,7 @@ class BackupVerifier {
     try {
       final serverAssets = await _apiClient.listAssets();
       serverById = {for (final a in serverAssets) a.id: a};
-    } on ImmichApiException {
+    } on Exception {
       final outcome = VerifyOutcome(
         localId: asset.localId,
         serverAssetId: asset.serverAssetId,

@@ -77,8 +77,10 @@ class TailscaleMonitor {
   final Duration _pollInterval;
 
   /// The Tailscale IP of the laptop peer to watch. When null the monitor is
-  /// disabled and reports offline.
-  final String? _peerIp;
+  /// disabled and reports offline. Mutable so [configurePeer] can update it
+  /// after construction (the IP is derived from the stored Immich server URL,
+  /// which is only known after session restore/login).
+  String? _peerIp;
 
   Timer? _timer;
   TailscalePeerState _state = TailscalePeerState.unknown;
@@ -108,6 +110,7 @@ class TailscaleMonitor {
   /// triggers an immediate refresh if polling is active.
   void configurePeer(String? peerIp) {
     if (peerIp == _peerIp) return;
+    _peerIp = peerIp;
     _state = TailscalePeerState.unknown;
     if (_timer != null) {
       unawaited(_refresh());

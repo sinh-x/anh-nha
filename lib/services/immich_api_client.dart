@@ -59,25 +59,52 @@ class ImmichLoginResult {
   });
 }
 
-/// Response item from Immich's bulk-upload-check endpoint.
+/// Item used both as the request payload for `/assets/bulk-upload-check`
+/// and as the parsed response item.
+///
+/// **Request side** (sent to the server): `{id, checksum}` where `id` is the
+/// local asset id and `checksum` is the base64-encoded SHA-1.
+///
+/// **Response side** (parsed from the server): `{id, action, assetId?,
+/// isTrashed?, reason?}`. There is no `checksum` field and no `isArchived`
+/// field in the response. An asset is "already on the server" when
+/// `action == 'reject' && reason == 'duplicate'`; the existing asset's id is
+/// in `assetId` (use it for the synced_assets record).
 class BulkUploadCheckItem {
+  /// Local asset id (request) / echoed id (response).
   final String id;
-  final String checksum;
-  final bool isArchived;
+
+  /// Base64-encoded SHA-1 checksum (request side only; null on response
+  /// items parsed via [fromJson]).
+  final String? checksum;
+
+  // Response-side fields (null on request items).
+  final String? action;
+  final String? assetId;
+  final String? reason;
+  final bool isTrashed;
 
   const BulkUploadCheckItem({
     required this.id,
-    required this.checksum,
-    this.isArchived = false,
+    this.checksum,
+    this.action,
+    this.assetId,
+    this.reason,
+    this.isTrashed = false,
   });
 
   factory BulkUploadCheckItem.fromJson(Map<String, dynamic> json) {
     return BulkUploadCheckItem(
       id: json['id'] as String,
-      checksum: json['checksum'] as String,
-      isArchived: (json['isArchived'] as bool?) ?? false,
+      action: json['action'] as String?,
+      assetId: json['assetId'] as String?,
+      reason: json['reason'] as String?,
+      isTrashed: (json['isTrashed'] as bool?) ?? false,
     );
   }
+
+  /// True when the server already has this asset (duplicate).
+  bool get isDuplicate => action == 'reject' && reason == 'duplicate';
 }
 
 /// Result of a bulk upload check.
@@ -86,10 +113,17 @@ class BulkUploadCheckResult {
 
   const BulkUploadCheckResult(this.results);
 
-  /// Returns the IDs of assets whose checksum already exists on the server.
-  /// These should NOT be re-uploaded.
+  /// Returns the IDs of assets the server already has. These should NOT be
+  /// re-uploaded.
   Set<String> get existingIds =>
-      results.where((item) => item.isArchived).map((item) => item.id).toSet();
+      results.where((item) => item.isDuplicate).map((item) => item.id).toSet();
+
+  /// Map of local id → server asset id for duplicates (used to record the
+  /// server-asset linkage for dedup-hit entries).
+  Map<String, String> get duplicateServerIds => {
+        for (final item in results)
+          if (item.isDuplicate && item.assetId != null) item.id: item.assetId!,
+      };
 }
 
 /// Minimal metadata about an uploaded asset as returned by Immich.
@@ -100,7 +134,7 @@ class UploadedAsset {
   const UploadedAsset({required this.id, this.checksum});
 }
 
-/// Minimal asset metadata returned by Immich's list endpoint, used by the
+/// Minimal asset metadata returned by Immich's search endpoint, used by the
 /// dashboard to compute per-device totals and last-sync timestamps (FR-6),
 /// and by the backup verifier to compare server-stored checksums against
 /// local files (FR-7, Phase 6).
@@ -111,7 +145,7 @@ class ImmichAsset {
   final DateTime modifiedAt;
   final bool isFavorite;
 
-  /// Server-stored SHA-256 checksum as base64, or null when Immich omits the
+  /// Server-stored SHA-1 checksum as base64, or null when Immich omits the
   /// field. Used by the backup verifier (FR-7).
   final String? checksumBase64;
 
@@ -256,7 +290,7 @@ class ImmichApiClient {
   /// ones already exist (and so should not be re-uploaded).
   ///
   /// Immich endpoint: POST /api/assets/bulk-upload-check
-  /// Body: {"assets": [{"id": "<local-id>", "checksum": "<base64 sha256>"}]}
+  /// Body: {"assets": [{"id": "<local-id>", "checksum": "<base64 sha1>"}]}
   Future<BulkUploadCheckResult> checkBulkUpload(
     List<BulkUploadCheckItem> assets,
   ) async {
@@ -364,30 +398,51 @@ class ImmichApiClient {
     );
   }
 
-  /// List all assets for the authenticated user, optionally filtered by
-  /// `deviceId`. Immich returns assets newest-first by default.
+  /// List assets for the authenticated user, optionally filtered by
+  /// `deviceId`. Pages through Immich's `POST /api/search/metadata` endpoint
+  /// (the legacy `GET /api/assets` list route does not exist in current
+  /// Immich). Used by the dashboard to compute per-device totals and
+  /// last-sync timestamps (FR-6), and by the backup verifier (FR-7).
   ///
-  /// Immich endpoint: GET /api/assets[?deviceId=...]
-  /// Used by the dashboard to compute per-device totals and last-sync
-  /// timestamps (FR-6).
-  Future<List<ImmichAsset>> listAssets({String? deviceId}) async {
-    final query = <String, String>{};
-    if (deviceId != null && deviceId.isNotEmpty) {
-      query['deviceId'] = deviceId;
-    }
-    final uri = _uri('/api/assets').replace(queryParameters: query);
-    final response = await _httpClient.get(uri, headers: _headers());
-    if (response.statusCode != 200) {
-      throw ImmichApiException(
-        response.statusCode,
-        'listAssets failed',
-        response.body,
+  /// The response shape is `{albums: {...}, assets: {items: [...], nextPage: N?}}`.
+  /// We page until `nextPage` is null. [pageSize] controls the per-request
+  /// batch size (Immich default/max is 1000).
+  Future<List<ImmichAsset>> listAssets({
+    String? deviceId,
+    int pageSize = 1000,
+  }) async {
+    final out = <ImmichAsset>[];
+    int? page;
+    do {
+      final body = <String, Object?>{
+        'size': pageSize,
+        'page': page ?? 0,
+      };
+      if (deviceId != null && deviceId.isNotEmpty) {
+        body['deviceId'] = deviceId;
+      }
+      final response = await _httpClient.post(
+        _uri('/api/search/metadata'),
+        headers: _headers(extra: {'Content-Type': 'application/json'}),
+        body: jsonEncode(body),
       );
-    }
-    final body = jsonDecode(response.body) as List<dynamic>;
-    return body
-        .map((e) => ImmichAsset.fromJson(e as Map<String, dynamic>))
-        .toList();
+      if (response.statusCode != 200) {
+        throw ImmichApiException(
+          response.statusCode,
+          'search/metadata failed',
+          response.body,
+        );
+      }
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final assetsBlock = decoded['assets'] as Map<String, dynamic>? ?? {};
+      final items = (assetsBlock['items'] as List<dynamic>?) ?? [];
+      for (final e in items) {
+        out.add(ImmichAsset.fromJson(e as Map<String, dynamic>));
+      }
+      final next = assetsBlock['nextPage'];
+      page = next == null ? null : (next is int ? next : int.tryParse('$next'));
+    } while (page != null);
+    return out;
   }
 
   /// Close the underlying HTTP client. Safe to call multiple times.

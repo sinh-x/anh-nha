@@ -49,10 +49,10 @@ class DeviceDashboardEntry {
 ///
 /// Sources:
 /// - **Total synced count** + **last sync timestamp**: queried from the
-///   Immich server via [ImmichApiClient.listAssets]. Each asset records the
-///   `deviceId` that uploaded it, so we group assets by device ID to get
-///   per-device totals and the most recent `fileModifiedAt` as a proxy for
-///   last sync time.
+///   Immich server via [ImmichApiClient.listAssets] (which pages through
+///   `POST /api/search/metadata`). Each asset records the `deviceId` that
+///   uploaded it, so we group assets by device ID to get per-device totals
+///   and the most recent `fileModifiedAt` as a proxy for last sync time.
 /// - **Pending queue size**: only the local device's queue is known (from
 ///   [SyncQueueDb.stats]); remote devices' queues live on their own phones
 ///   and are not exposed by the Immich API, so they are reported as 0.
@@ -90,9 +90,11 @@ class DeviceRegistry {
     final List<ImmichAsset> assets;
     try {
       assets = await _apiClient.listAssets();
-    } on ImmichApiException {
+    } on Exception {
       // Server unreachable — return cached stats so the dashboard still
-      // renders with the last-known data.
+      // renders with the last-known data. Broadened from
+      // `on ImmichApiException` so socket/timeout/HTTP-client errors also
+      // engage the fallback.
       return _cachedEntries(
         localDeviceId: localDeviceId,
         localPendingCount: localPendingCount,

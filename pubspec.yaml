@@ -51,7 +51,7 @@ dependencies:
   # Network connectivity monitoring for WiFi-only gating.
   connectivity_plus: ^6.1.5
 
-  # SHA-256 checksums for dedup + verification.
+  # SHA-1 checksums for dedup + verification (Immich uses SHA-1).
   crypto: ^3.0.6
 
   # Immutable value classes for queued assets.
@@ -66,6 +66,10 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+
+  # FFI SQLite binding + factory so widget/unit tests can open the queue DB
+  # without the Android sqflite plugin.
+  sqflite_common_ffi: ^2.3.4
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

@@ -267,13 +267,18 @@ class SyncEngine {
             ))
         .toList();
     Set<String> existingIds;
+    Map<String, String> duplicateServerIds;
     try {
       final result = await apiClient.checkBulkUpload(dedupItems);
       existingIds = result.existingIds;
-    } on Exception {
-      // Dedup check is best-effort; if the server is unreachable we proceed
-      // and let the upload itself surface the error into the retry loop.
+      duplicateServerIds = result.duplicateServerIds;
+    } catch (e) {
+      // Dedup check is best-effort; if the server is unreachable (or the
+      // response schema is unexpected) we proceed and let the upload itself
+      // surface the error into the retry loop. NOTE: catching `Object` (not
+      // `Exception`) so a `TypeError` from a schema drift does not escape.
       existingIds = const {};
+      duplicateServerIds = const {};
     }
 
     var passUploaded = 0;
@@ -287,6 +292,7 @@ class SyncEngine {
           filePath: entry.filePath,
           fileExtension: entry.fileExtension,
           checksumBase64: entry.checksumBase64,
+          serverAssetId: duplicateServerIds[entry.localId],
           serverChecksumBase64: entry.checksumBase64,
           checksumVerified: true,
           syncedAt: DateTime.now(),
@@ -465,7 +471,7 @@ class _AssetInfo {
 
   static Future<_AssetInfo> fromAsset(AssetEntity asset, File file) async {
     final bytes = await file.readAsBytes();
-    final hash = sha256.convert(bytes);
+    final hash = sha1.convert(bytes);
     final checksum = base64Encode(hash.bytes);
     final stat = await file.stat();
     final ext = (asset.title?.split('.').last ?? 'jpg').toLowerCase();
