@@ -3,8 +3,10 @@
 .packages
 build/
 *.iml
-*.lock
 *.log
+# Keep pubspec.lock for apps (reproducible builds), but ignore other lock files
+# (e.g. Gradle's buildscript caches)
+buildscript-*.lock
 
 # Android
 *.apk
