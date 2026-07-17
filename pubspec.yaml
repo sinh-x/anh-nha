@@ -35,6 +35,27 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+  # HTTP client for Immich REST API.
+  http: ^1.4.0
+
+  # Local file system paths (app documents dir).
+  path_provider: ^2.1.5
+
+  # Media store access for scanning device photos.
+  photo_manager: ^3.6.4
+
+  # Persistent key-value store for auth token + settings.
+  shared_preferences: ^2.5.3
+
+  # Network connectivity monitoring for WiFi-only gating.
+  connectivity_plus: ^6.1.5
+
+  # SHA-256 checksums for dedup + verification.
+  crypto: ^3.0.6
+
+  # Immutable value classes for queued assets.
+  uuid: ^4.5.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

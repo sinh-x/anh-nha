@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "dev.sinh.anh_nha"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = "29.0.14206865"
     buildToolsVersion = "37.0.0"
 
