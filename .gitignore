@@ -1,0 +1,20 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+*.iml
+*.lock
+*.log
+
+# Android
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
