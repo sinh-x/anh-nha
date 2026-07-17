@@ -10,8 +10,13 @@ import '../services/immich_api_client.dart';
 /// home screen.
 class LoginScreen extends StatefulWidget {
   final AuthStore authStore;
+  final VoidCallback onLoginSuccess;
 
-  const LoginScreen({super.key, required this.authStore});
+  const LoginScreen({
+    super.key,
+    required this.authStore,
+    required this.onLoginSuccess,
+  });
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -47,6 +52,7 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       final result = await widget.authStore.apiClient.login(creds);
       await widget.authStore.saveLogin(result, creds.serverUrl.trim());
+      widget.onLoginSuccess();
       if (mounted) {
         Navigator.of(context).pushReplacementNamed('/home');
       }

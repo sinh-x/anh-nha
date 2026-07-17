@@ -3,20 +3,24 @@ import 'package:flutter/material.dart';
 import '../services/auth_store.dart';
 import '../services/connectivity_monitor.dart';
 import '../services/sync_engine.dart';
+import '../services/sync_queue_db.dart';
 import '../services/immich_api_client.dart';
+import '../services/tailscale_monitor.dart';
 
-/// Home screen showing sync status, WiFi-only indicator, and a manual sync
-/// button (FR-2, FR-8).
+/// Home screen showing sync status, WiFi + Tailscale indicators, the
+/// persistent queue, and a manual sync button (FR-2, FR-3, FR-4, FR-8).
 class HomeScreen extends StatefulWidget {
   final AuthStore authStore;
   final SyncEngine syncEngine;
   final ConnectivityMonitor connectivity;
+  final TailscaleMonitor tailscale;
 
   const HomeScreen({
     super.key,
     required this.authStore,
     required this.syncEngine,
     required this.connectivity,
+    required this.tailscale,
   });
 
   @override
@@ -30,7 +34,9 @@ class _HomeScreenState extends State<HomeScreen> {
     dedupSkipped: 0,
     failed: 0,
     wifiOnly: false,
+    peerOnline: false,
     running: false,
+    queue: QueueStats.empty(),
     recent: [],
   );
   String? _userId;
@@ -40,6 +46,9 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     widget.authStore.userId().then((id) {
       if (mounted) setState(() => _userId = id);
+    });
+    widget.tailscale.changes.listen((_) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -72,6 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final wifi = _summary.wifiOnly;
+    final peer = widget.tailscale.isPeerOnline;
     return Scaffold(
       appBar: AppBar(
         title: const Text('anh-nha'),
@@ -97,6 +107,20 @@ class _HomeScreenState extends State<HomeScreen> {
             label: 'Network',
             value: wifi ? 'WiFi (uploads allowed)' : 'Not WiFi (uploads blocked)',
             ok: wifi,
+          ),
+          _StatusTile(
+            icon: peer ? Icons.vpn_lock : Icons.cloud_off,
+            label: 'Tailscale peer',
+            value: peer
+                ? 'Online — ${widget.tailscale.state.hostName ?? widget.tailscale.state.peerAddress ?? "reachable"}'
+                : 'Waiting for server',
+            ok: peer,
+          ),
+          _StatusTile(
+            icon: Icons.queue,
+            label: 'Queue pending',
+            value: '${_summary.queue.pending}',
+            ok: _summary.queue.pending == 0,
           ),
           _StatusTile(
             icon: Icons.cloud_upload,

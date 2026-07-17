@@ -8,6 +8,9 @@ import 'package:photo_manager/photo_manager.dart';
 import 'auth_store.dart';
 import 'connectivity_monitor.dart';
 import 'immich_api_client.dart';
+import 'queue_notifier.dart';
+import 'sync_queue_db.dart';
+import 'tailscale_monitor.dart';
 
 /// Status of a single asset in the sync pipeline.
 enum SyncStatus { pending, dedupHit, uploading, uploaded, failed }
@@ -50,7 +53,9 @@ class SyncSummary {
   final int dedupSkipped;
   final int failed;
   final bool wifiOnly;
+  final bool peerOnline;
   final bool running;
+  final QueueStats queue;
   final List<SyncProgress> recent;
 
   const SyncSummary({
@@ -59,28 +64,48 @@ class SyncSummary {
     required this.dedupSkipped,
     required this.failed,
     required this.wifiOnly,
+    required this.peerOnline,
     required this.running,
+    required this.queue,
     required this.recent,
   });
+
+  /// Convenience: pending count from the persistent queue (FR-3).
+  int get pendingCount => queue.pending;
 }
 
 /// Callback signature for sync progress notifications.
 typedef SyncProgressCallback = void Function(SyncSummary summary);
 
-/// Core sync engine (FR-2).
+/// Core sync engine (FR-2, FR-3, FR-4).
 ///
-/// Responsibilities:
-///   1. Scan the device media store for photos not yet uploaded.
-///   2. Compute SHA-256 checksums for dedup.
-///   3. Ask the server which checksums already exist (bulk-upload-check).
-///   4. Upload the remaining assets.
-///   5. Skip all work when not on WiFi (FR-8).
+/// Phase 3 adds a persistent SQLite-backed queue ([SyncQueueDb]), Tailscale
+/// peer-awareness ([TailscaleMonitor]), retry with exponential backoff, and
+/// a foreground notification ([QueueNotifier]) showing the queue status.
 ///
-/// Phase 3 will extend this with a persistent queue + Tailscale peer check.
+/// Sync is allowed only when ALL of the following hold:
+///   1. Authenticated with the Immich server (FR-1).
+///   2. Active network is WiFi (FR-8).
+///   3. The laptop Immich peer is online over Tailscale (FR-4).
+///
+/// When the laptop is offline, scanned photos are enqueued and the engine
+/// retries them on the next poll after the peer becomes reachable again
+/// (NFR-2: sync begins within 60s of peer reachable).
 class SyncEngine {
   final ImmichApiClient apiClient;
   final AuthStore authStore;
   final ConnectivityMonitor connectivity;
+  final SyncQueueDb queueDb;
+  final TailscaleMonitor tailscale;
+  final QueueNotifier notifier;
+
+  /// Maximum retry attempts per asset before it is left in `failed` state.
+  static const maxRetries = 8;
+
+  /// Base backoff delay for the first retry. Subsequent retries double the
+  /// delay up to [maxBackoff].
+  static const baseBackoff = Duration(seconds: 30);
+  static const maxBackoff = Duration(hours: 1);
 
   bool _running = false;
   final List<SyncProgress> _recent = [];
@@ -88,12 +113,19 @@ class SyncEngine {
   int _uploaded = 0;
   int _dedupSkipped = 0;
   int _failed = 0;
+  QueueStats _queue = QueueStats.empty();
+  StreamSubscription<TailscalePeerState>? _peerSub;
 
   SyncEngine({
     required this.apiClient,
     required this.authStore,
     required this.connectivity,
-  });
+    required this.queueDb,
+    required this.tailscale,
+    required this.notifier,
+  }) {
+    _peerSub = tailscale.changes.listen(_onPeerChange);
+  }
 
   /// True while a sync pass is in flight.
   bool get isRunning => _running;
@@ -105,28 +137,60 @@ class SyncEngine {
         dedupSkipped: _dedupSkipped,
         failed: _failed,
         wifiOnly: connectivity.isWifi,
+        peerOnline: tailscale.isPeerOnline,
         running: _running,
+        queue: _queue,
         recent: List.unmodifiable(_recent),
       );
 
-  /// Run a single sync pass. Returns the final summary.
+  /// Begin watching the Tailscale peer and refreshing queue stats. Should be
+  /// called once at app startup, after [queueDb.open] and before the first
+  /// sync pass.
+  Future<void> start() async {
+    await _refreshQueueStats();
+    tailscale.start();
+  }
+
+  /// Stop watching the Tailscale peer.
+  void stop() {
+    tailscale.stop();
+  }
+
+  /// Release resources. Called from the app's dispose path.
+  void dispose() {
+    _peerSub?.cancel();
+    tailscale.dispose();
+  }
+
+  /// React to a Tailscale peer-state change: when the laptop just came
+  /// online, kick a sync pass to drain the queue (NFR-2).
+  void _onPeerChange(TailscalePeerState state) {
+    if (state.online && connectivity.isWifi && apiClient.isAuthenticated) {
+      unawaited(_drainQueue());
+    }
+  }
+
+  /// Run a single sync pass: scan the media store, enqueue anything new, and
+  /// attempt to drain the queue if the peer is reachable.
   ///
-  /// Throws if not authenticated. Returns immediately if not on WiFi.
+  /// Throws if not authenticated. Returns immediately (after enqueueing) if
+  /// not on WiFi or the peer is offline — queued photos persist and will be
+  /// retried automatically when the peer comes back (FR-4, NFR-6).
   Future<SyncSummary> runOnce({SyncProgressCallback? onProgress}) async {
     if (_running) return summary;
     if (!apiClient.isAuthenticated) {
       throw StateError('Not authenticated — call login first');
     }
-    final state = await connectivity.check();
-    if (!state.isWifi) {
-      onProgress?.call(summary);
-      return summary;
-    }
     _running = true;
     onProgress?.call(summary);
     try {
       final deviceId = await authStore.deviceId();
-      await _scanAndUpload(deviceId, onProgress);
+      await _scanAndEnqueue(deviceId, onProgress);
+      final state = await connectivity.check();
+      if (state.isWifi && tailscale.isPeerOnline) {
+        await _drainQueue(onProgress: onProgress);
+      }
+      await _refreshQueueStats();
     } finally {
       _running = false;
       onProgress?.call(summary);
@@ -134,17 +198,17 @@ class SyncEngine {
     return summary;
   }
 
-  /// Scan media store, dedup, and upload. Updates internal counters.
-  Future<void> _scanAndUpload(
+  /// Scan the media store and enqueue every asset not already known to the
+  /// queue. Assets already uploaded are deduped against the server later in
+  /// [_drainQueue].
+  Future<void> _scanAndEnqueue(
     String deviceId,
     SyncProgressCallback? onProgress,
   ) async {
     final permission = await PhotoManager.requestPermissionExtend(
       requestOption: const PermissionRequestOption(),
     );
-    if (!permission.isAuth) {
-      return;
-    }
+    if (!permission.isAuth) return;
     final albums = await PhotoManager.getAssetPathList(
       type: RequestType.image,
       hasAll: true,
@@ -163,60 +227,127 @@ class SyncEngine {
     _scanned = assets.length;
     onProgress?.call(summary);
 
-    final fileInfos = <_AssetInfo>[];
+    final entries = <QueueEntry>[];
     for (final asset in assets) {
       final file = await asset.originFile;
       if (file == null) continue;
       final info = await _AssetInfo.fromAsset(asset, file);
-      fileInfos.add(info);
-    }
-    if (fileInfos.isEmpty) return;
-
-    final dedupItems = fileInfos
-        .map((info) => BulkUploadCheckItem(
-              id: info.localId,
-              checksum: info.checksumBase64,
-            ))
-        .toList();
-    final existing = await apiClient.checkBulkUpload(dedupItems);
-    final existingIds = existing.existingIds;
-
-    for (final info in fileInfos) {
-      final progress = SyncProgress(
+      entries.add(QueueEntry(
         localId: info.localId,
         filename: info.filename,
-        status: SyncStatus.pending,
-      );
-      _track(progress);
-      onProgress?.call(summary);
+        filePath: info.filePath,
+        fileExtension: info.extension,
+        checksumBase64: info.checksumBase64,
+        createdAtIso: info.createdAt.toUtc().toIso8601String(),
+        modifiedAtIso: info.modifiedAt.toUtc().toIso8601String(),
+        status: QueueStatus.pending,
+        retryCount: 0,
+        updatedAt: DateTime.now(),
+      ));
+    }
+    if (entries.isEmpty) return;
+    await queueDb.enqueueAll(entries);
+    await _refreshQueueStats();
+    onProgress?.call(summary);
+  }
 
-      if (existingIds.contains(info.localId)) {
+  /// Drain the persistent queue: upload each retry-due pending asset with
+  /// dedup and exponential backoff on failure (FR-3, NFR-2).
+  Future<void> _drainQueue({SyncProgressCallback? onProgress}) async {
+    if (!apiClient.isAuthenticated) return;
+    final pending = await queueDb.listRetryDue(limit: 100);
+    if (pending.isEmpty) return;
+
+    final deviceId = await authStore.deviceId();
+
+    final dedupItems = pending
+        .map((e) => BulkUploadCheckItem(
+              id: e.localId,
+              checksum: e.checksumBase64,
+            ))
+        .toList();
+    Set<String> existingIds;
+    try {
+      final result = await apiClient.checkBulkUpload(dedupItems);
+      existingIds = result.existingIds;
+    } on Exception {
+      // Dedup check is best-effort; if the server is unreachable we proceed
+      // and let the upload itself surface the error into the retry loop.
+      existingIds = const {};
+    }
+
+    for (final entry in pending) {
+      if (existingIds.contains(entry.localId)) {
         _dedupSkipped++;
-        _track(progress.copyWith(status: SyncStatus.dedupHit));
+        await queueDb.markUploaded(entry.id!);
+        _track(SyncProgress(
+          localId: entry.localId,
+          filename: entry.filename,
+          status: SyncStatus.dedupHit,
+        ));
         onProgress?.call(summary);
         continue;
       }
+      final progress = SyncProgress(
+        localId: entry.localId,
+        filename: entry.filename,
+        status: SyncStatus.uploading,
+      );
+      _track(progress);
+      onProgress?.call(summary);
       try {
-        _track(progress.copyWith(status: SyncStatus.uploading));
-        onProgress?.call(summary);
         await apiClient.uploadAsset(
-          localId: info.localId,
+          localId: entry.localId,
           deviceId: deviceId,
-          filePath: info.filePath,
-          fileExtension: info.extension,
-          fileCreatedAt: info.createdAt,
-          fileModifiedAt: info.modifiedAt,
+          filePath: entry.filePath,
+          fileExtension: entry.fileExtension,
+          fileCreatedAt: DateTime.parse(entry.createdAtIso),
+          fileModifiedAt: DateTime.parse(entry.modifiedAtIso),
           isFavorite: false,
-          checksumBase64: info.checksumBase64,
+          checksumBase64: entry.checksumBase64,
         );
         _uploaded++;
+        await queueDb.markUploaded(entry.id!);
         _track(progress.copyWith(status: SyncStatus.uploaded));
       } catch (e) {
         _failed++;
+        final nextRetry = entry.retryCount + 1;
+        if (nextRetry >= maxRetries) {
+          await queueDb.update(entry.copyWith(
+            status: QueueStatus.failed,
+            retryCount: nextRetry,
+            lastError: '$e',
+          ));
+        } else {
+          final backoff = _backoffFor(nextRetry);
+          await queueDb.update(entry.copyWith(
+            status: QueueStatus.pending,
+            retryCount: nextRetry,
+            lastError: '$e',
+            nextAttemptAt: DateTime.now().add(backoff),
+          ));
+        }
         _track(progress.copyWith(status: SyncStatus.failed, error: '$e'));
       }
       onProgress?.call(summary);
     }
+    await _refreshQueueStats();
+  }
+
+  /// Exponential backoff schedule: base * 2^(retry-1), capped at maxBackoff.
+  Duration _backoffFor(int retry) {
+    final multiplier = 1 << (retry - 1);
+    final delay = baseBackoff * multiplier;
+    return delay > maxBackoff ? maxBackoff : delay;
+  }
+
+  Future<void> _refreshQueueStats() async {
+    _queue = await queueDb.stats();
+    await notifier.update(
+      pending: _queue.pending,
+      failed: _queue.failed,
+      peerOnline: tailscale.isPeerOnline,
+    );
   }
 
   void _track(SyncProgress progress) {
