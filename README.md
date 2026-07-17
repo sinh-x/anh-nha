@@ -6,4 +6,4 @@ Built with Flutter. Android 9+ (API 28). F-Droid distribution.
 
 ## Status
 
-Work in progress. See [PA-1287](https://github.com/sinh-x/anh-nha/issues) for requirements.
+Work in progress. See ANH-001 for requirements.
