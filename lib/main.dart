@@ -9,6 +9,7 @@ import 'services/sync_queue_db.dart';
 import 'services/tailscale_monitor.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/space_saver_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -103,6 +104,7 @@ class _AnhNhaAppState extends State<AnhNhaApp> {
               connectivity: _connectivity,
               tailscale: _tailscale,
             ),
+        '/space-saver': (context) => SpaceSaverScreen(queueDb: _queueDb),
       },
     );
   }

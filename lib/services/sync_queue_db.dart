@@ -5,6 +5,86 @@ import 'package:path/path.dart' as p;
 /// NFR-6).
 enum QueueStatus { pending, uploading, uploaded, failed }
 
+/// A locally-synced asset that has been uploaded to the server and whose
+/// checksum was verified (FR-5). Rows persist after the upload queue entry is
+/// removed so the space-saver tool can offer safe local deletion.
+class SyncedAsset {
+  final int? id;
+  final String localId;
+  final String filename;
+  final String filePath;
+  final String fileExtension;
+  final String checksumBase64;
+  final String? serverAssetId;
+  final String? serverChecksumBase64;
+  final bool checksumVerified;
+  final DateTime syncedAt;
+  final bool localDeleted;
+
+  const SyncedAsset({
+    this.id,
+    required this.localId,
+    required this.filename,
+    required this.filePath,
+    required this.fileExtension,
+    required this.checksumBase64,
+    this.serverAssetId,
+    this.serverChecksumBase64,
+    required this.checksumVerified,
+    required this.syncedAt,
+    this.localDeleted = false,
+  });
+
+  factory SyncedAsset.fromRow(Map<String, Object?> row) {
+    return SyncedAsset(
+      id: row['id'] as int?,
+      localId: row['local_id'] as String,
+      filename: row['filename'] as String,
+      filePath: row['file_path'] as String,
+      fileExtension: row['file_extension'] as String,
+      checksumBase64: row['checksum_base64'] as String,
+      serverAssetId: row['server_asset_id'] as String?,
+      serverChecksumBase64: row['server_checksum_base64'] as String?,
+      checksumVerified: (row['checksum_verified'] as int) == 1,
+      syncedAt:
+          DateTime.fromMillisecondsSinceEpoch(row['synced_at'] as int),
+      localDeleted: (row['local_deleted'] as int) == 1,
+    );
+  }
+
+  Map<String, Object?> toRow() {
+    return {
+      if (id != null) 'id': id,
+      'local_id': localId,
+      'filename': filename,
+      'file_path': filePath,
+      'file_extension': fileExtension,
+      'checksum_base64': checksumBase64,
+      'server_asset_id': serverAssetId,
+      'server_checksum_base64': serverChecksumBase64,
+      'checksum_verified': checksumVerified ? 1 : 0,
+      'synced_at': syncedAt.millisecondsSinceEpoch,
+      'local_deleted': localDeleted ? 1 : 0,
+    };
+  }
+
+  SyncedAsset copyWith({bool? localDeleted}) {
+    return SyncedAsset(
+      id: id,
+      localId: localId,
+      filename: filename,
+      filePath: filePath,
+      fileExtension: fileExtension,
+      checksumBase64: checksumBase64,
+      serverAssetId: serverAssetId,
+      serverChecksumBase64: serverChecksumBase64,
+      checksumVerified: checksumVerified,
+      syncedAt: syncedAt,
+      localDeleted: localDeleted ?? this.localDeleted,
+    );
+  }
+}
+
 /// Extension methods to convert between the integer code stored in the DB and
 /// the typed [QueueStatus] enum.
 extension QueueStatusCode on QueueStatus {
@@ -192,7 +272,7 @@ class QueueStats {
 /// DB stays small even with thousands of queued photos.
 class SyncQueueDb {
   static const _dbName = 'anh_nha_queue.db';
-  static const _schemaVersion = 1;
+  static const _schemaVersion = 2;
 
   Database? _db;
 
@@ -206,10 +286,22 @@ class SyncQueueDb {
       path,
       version: _schemaVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
   Future<void> _onCreate(Database db, int version) async {
+    await _createQueueTable(db);
+    await _createSyncedAssetsTable(db);
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await _createSyncedAssetsTable(db);
+    }
+  }
+
+  Future<void> _createQueueTable(Database db) async {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,6 +324,32 @@ class SyncQueueDb {
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_queue_local_id ON queue(local_id)',
+    );
+  }
+
+  /// Table of assets that have been uploaded AND checksum-verified (FR-5).
+  /// Used by the space-saver tool to list safe-to-delete local photos.
+  Future<void> _createSyncedAssetsTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS synced_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_id TEXT NOT NULL UNIQUE,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_extension TEXT NOT NULL,
+        checksum_base64 TEXT NOT NULL,
+        server_asset_id TEXT,
+        server_checksum_base64 TEXT,
+        checksum_verified INTEGER NOT NULL DEFAULT 0,
+        synced_at INTEGER NOT NULL,
+        local_deleted INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_synced_local_id ON synced_assets(local_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_synced_deleted ON synced_assets(local_deleted)',
     );
   }
 
@@ -319,6 +437,7 @@ class SyncQueueDb {
   /// Remove all rows regardless of status. Used by tests and the logout flow.
   Future<void> clear() async {
     await _dbRef.delete('queue');
+    await _dbRef.delete('synced_assets');
   }
 
   /// Aggregate counts by status, surfaced to the UI and foreground
@@ -331,6 +450,66 @@ class SyncQueueDb {
   /// Total number of rows in the queue (all statuses).
   Future<int> count() async {
     final rows = await _dbRef.rawQuery('SELECT COUNT(*) AS c FROM queue');
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  // --- Synced assets (FR-5) -----------------------------------------------
+
+  /// Record a synced+verified asset, or no-op if `localId` is already known.
+  Future<void> markSynced(SyncedAsset asset) async {
+    await _dbRef.insert(
+      'synced_assets',
+      asset.toRow(),
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  /// Fetch all synced assets whose local file has NOT been deleted yet.
+  Future<List<SyncedAsset>> listDeletable() async {
+    final rows = await _dbRef.query(
+      'synced_assets',
+      where: 'local_deleted = 0',
+      orderBy: 'synced_at DESC',
+    );
+    return rows.map(SyncedAsset.fromRow).toList();
+  }
+
+  /// Fetch all synced assets regardless of local deletion state.
+  Future<List<SyncedAsset>> listAllSynced() async {
+    final rows = await _dbRef.query(
+      'synced_assets',
+      orderBy: 'synced_at DESC',
+    );
+    return rows.map(SyncedAsset.fromRow).toList();
+  }
+
+  /// Mark a synced asset as locally deleted (after the space-saver removed
+  /// the local copy).
+  Future<void> markLocallyDeleted(int id) async {
+    await _dbRef.update(
+      'synced_assets',
+      {'local_deleted': 1},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Remove all synced-asset rows (used by logout flow / tests).
+  Future<void> clearSynced() async {
+    await _dbRef.delete('synced_assets');
+  }
+
+  /// Total count of synced assets (verified).
+  Future<int> syncedCount() async {
+    final rows =
+        await _dbRef.rawQuery('SELECT COUNT(*) AS c FROM synced_assets');
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  /// Count of synced assets already locally deleted.
+  Future<int> locallyDeletedCount() async {
+    final rows = await _dbRef
+        .rawQuery('SELECT COUNT(*) AS c FROM synced_assets WHERE local_deleted = 1');
     return Sqflite.firstIntValue(rows) ?? 0;
   }
 

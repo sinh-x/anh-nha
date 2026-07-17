@@ -280,6 +280,16 @@ class SyncEngine {
       if (existingIds.contains(entry.localId)) {
         _dedupSkipped++;
         await queueDb.markUploaded(entry.id!);
+        await queueDb.markSynced(SyncedAsset(
+          localId: entry.localId,
+          filename: entry.filename,
+          filePath: entry.filePath,
+          fileExtension: entry.fileExtension,
+          checksumBase64: entry.checksumBase64,
+          serverChecksumBase64: entry.checksumBase64,
+          checksumVerified: true,
+          syncedAt: DateTime.now(),
+        ));
         _track(SyncProgress(
           localId: entry.localId,
           filename: entry.filename,
@@ -296,7 +306,7 @@ class SyncEngine {
       _track(progress);
       onProgress?.call(summary);
       try {
-        await apiClient.uploadAsset(
+        final uploaded = await apiClient.uploadAsset(
           localId: entry.localId,
           deviceId: deviceId,
           filePath: entry.filePath,
@@ -308,6 +318,25 @@ class SyncEngine {
         );
         _uploaded++;
         await queueDb.markUploaded(entry.id!);
+        // FR-5: only mark as verified when the server-returned checksum
+        // matches the locally computed one. If the server omits the
+        // checksum field, mark as unverified so the space-saver will not
+        // offer it for deletion.
+        final serverChecksum = uploaded.checksum;
+        final verified = serverChecksum != null &&
+            serverChecksum.isNotEmpty &&
+            _constantTimeEquals(serverChecksum, entry.checksumBase64);
+        await queueDb.markSynced(SyncedAsset(
+          localId: entry.localId,
+          filename: entry.filename,
+          filePath: entry.filePath,
+          fileExtension: entry.fileExtension,
+          checksumBase64: entry.checksumBase64,
+          serverAssetId: uploaded.id,
+          serverChecksumBase64: serverChecksum,
+          checksumVerified: verified,
+          syncedAt: DateTime.now(),
+        ));
         _track(progress.copyWith(status: SyncStatus.uploaded));
       } catch (e) {
         _failed++;
@@ -339,6 +368,17 @@ class SyncEngine {
     final multiplier = 1 << (retry - 1);
     final delay = baseBackoff * multiplier;
     return delay > maxBackoff ? maxBackoff : delay;
+  }
+
+  /// Constant-time string comparison to avoid timing-side-channel checksum
+  /// comparison. Returns true when [a] and [b] are equal.
+  bool _constantTimeEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
   }
 
   Future<void> _refreshQueueStats() async {
