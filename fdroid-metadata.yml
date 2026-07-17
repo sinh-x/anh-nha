@@ -1,10 +1,3 @@
-# F-Droid metadata placeholder
-# This file documents the F-Droid build configuration for anh-nha.
-# The canonical metadata YAML lives in the fdroiddata repo:
-# https://gitlab.com/fdroid/fdroiddata/-/blob/master/metadata/dev.sinh.anh_nha.yml
-#
-# Below is a template that can be submitted to fdroiddata when ready.
-
 Categories:
   - Multimedia
   - Internet
@@ -14,9 +7,9 @@ AuthorWebSite: https://github.com/sinh
 SourceCode: https://github.com/sinh/anh-nha
 IssueTracker: https://github.com/sinh/anh-nha/issues
 Changelog: https://github.com/sinh/anh-nha/releases
-Donate: ""
 
 AutoName: anh-nha
+Name: anh-nha
 Summary: Custom Android photo sync client for self-hosted Immich server
 Description: |-
     anh-nha (ảnh nhà) is a custom Android photo sync client for self-hosted
@@ -35,10 +28,16 @@ Description: |-
     - No data leaves your Tailscale network
     - No Google Play Services dependency
 
+    This app is designed for personal/family use with a self-hosted Immich
+    server. It is not affiliated with the Immich project.
+
 RequiresRoot: false
 
 RepoType: git
 Repo: https://github.com/sinh/anh-nha.git
+
+Binaries:
+  - https://github.com/sinh/anh-nha/releases/download/v%v/anh-nha-%v.apk
 
 Builds:
   - versionName: '1.0.0'
@@ -49,12 +48,35 @@ Builds:
     output: build/app/outputs/flutter-apk/app-release.apk
     srclibs:
       - flutter@stable
-    build:
+    prebuild:
+      - export PUB_CACHE=$(pwd)/.pub-cache
+      - $$flutter$$/bin/flutter config --no-analytics
       - $$flutter$$/bin/flutter pub get
-      - $$flutter$$/bin/flutter build apk --release
+    build:
+      - export PUB_CACHE=$(pwd)/.pub-cache
+      - $$flutter$$/bin/flutter build apk --release --no-tree-shake-icons
+    ndk: r29
+
+AllowedAPIKeys:
+  - 100.100.100.100:41112
 
 MaintainerNotes: |-
-    Placeholder build config. Verify reproducibility before publishing.
+    Reproducible build notes:
+    - pubspec.lock is committed to ensure deterministic pub dependencies.
+    - Flutter stable channel is pinned via srclibs@flutter@stable; for full
+      reproducibility pin to a specific Flutter tag (e.g. flutter@3.27.4) and
+      update with each release.
+    - Build is performed with --no-tree-shake-icons so icon asset handling is
+      identical across build environments (tree shaking depends on the exact
+      set of referenced icons which can differ between analysis versions).
+    - No Google Play Services dependencies are present (no firebase,
+      crashlytics, play-services-*). Grep verifies this in CI.
+    - APK is signed with the builder's release keystore; F-Droid re-signs
+      with its own key during publication, so the unsigned/release build must
+      match byte-for-byte after stripping the signature block (F-Droid
+      verifies this automatically for Reproducible: true).
+    - NDK version r29 is used to match the local build environment
+      (android/app/build.gradle.kts pins ndkVersion = 29.0.14206865).
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags

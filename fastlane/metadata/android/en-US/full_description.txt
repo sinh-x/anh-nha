@@ -2,7 +2,7 @@ anh-nha (ảnh nhà)
 
 A custom Android photo sync client for self-hosted Immich servers, accessible via Tailscale VPN.
 
-Features (planned):
+Features:
 - Auto-upload photos to your Immich server over WiFi when Tailscale is connected
 - Free local storage after verified sync (safe delete of synced photos)
 - Visible offline sync queue with retry

@@ -15,6 +15,9 @@ buildscript-*.lock
 *.aab
 *.jks
 *.keystore
+android/key.properties
+android/app/*.jks
+android/app/*.keystore
 
 # IDE
 .idea/
