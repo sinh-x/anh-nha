@@ -4,7 +4,7 @@ This file guides AI agents and contributors working in the `anh-nha` repository 
 
 ## Branch Strategy
 
-This repository follows a standard Git Flow branching model.
+This repository follows a simplified Git Flow branching model.
 
 ### Branch Model
 
@@ -36,8 +36,9 @@ Examples:
 2. **Work locally** — commit using conventional commits: `type(scope): summary`. Valid types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`. Scope optional (e.g., `sync`, `auth`, `ui`).
 3. **Push the feature branch** — `git push -u origin feature/ANH-NNN-topic-slug`.
 4. **Open a PR** targeting `develop` (the integration branch). PR title uses the same conventional commit format.
-5. **Merge via squash** on `develop` once approved. For releases, open a PR from `develop` to `main`.
-6. **Delete the feature branch** after merge to keep the branch list clean.
+5. **Merge `feature/*` → `develop` via squash** once approved. This keeps the feature branch history collapsed into a single commit on `develop`.
+6. **Open a release PR from `develop` → `main`** for releases. Merge this PR with a **merge commit** (not squash) to preserve the release boundary and integration history on `main`.
+7. **Delete the feature branch** after merge to keep the branch list clean.
 
 ### Direct Push Policy
 
