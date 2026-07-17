@@ -100,6 +100,34 @@ class UploadedAsset {
   const UploadedAsset({required this.id, this.checksum});
 }
 
+/// Minimal asset metadata returned by Immich's list endpoint, used by the
+/// dashboard to compute per-device totals and last-sync timestamps (FR-6).
+class ImmichAsset {
+  final String id;
+  final String deviceId;
+  final DateTime createdAt;
+  final DateTime modifiedAt;
+  final bool isFavorite;
+
+  const ImmichAsset({
+    required this.id,
+    required this.deviceId,
+    required this.createdAt,
+    required this.modifiedAt,
+    required this.isFavorite,
+  });
+
+  factory ImmichAsset.fromJson(Map<String, dynamic> json) {
+    return ImmichAsset(
+      id: json['id'] as String,
+      deviceId: json['deviceId'] as String,
+      createdAt: DateTime.parse(json['fileCreatedAt'] as String),
+      modifiedAt: DateTime.parse(json['fileModifiedAt'] as String),
+      isFavorite: (json['isFavorite'] as bool?) ?? false,
+    );
+  }
+}
+
 /// Thin REST client for the Immich server API.
 ///
 /// Implements just the endpoints anh-nha needs in Phase 2:
@@ -326,6 +354,32 @@ class ImmichApiClient {
       id: body['id'] as String,
       checksum: body['checksum'] as String?,
     );
+  }
+
+  /// List all assets for the authenticated user, optionally filtered by
+  /// `deviceId`. Immich returns assets newest-first by default.
+  ///
+  /// Immich endpoint: GET /api/assets[?deviceId=...]
+  /// Used by the dashboard to compute per-device totals and last-sync
+  /// timestamps (FR-6).
+  Future<List<ImmichAsset>> listAssets({String? deviceId}) async {
+    final query = <String, String>{};
+    if (deviceId != null && deviceId.isNotEmpty) {
+      query['deviceId'] = deviceId;
+    }
+    final uri = _uri('/api/assets').replace(queryParameters: query);
+    final response = await _httpClient.get(uri, headers: _headers());
+    if (response.statusCode != 200) {
+      throw ImmichApiException(
+        response.statusCode,
+        'listAssets failed',
+        response.body,
+      );
+    }
+    final body = jsonDecode(response.body) as List<dynamic>;
+    return body
+        .map((e) => ImmichAsset.fromJson(e as Map<String, dynamic>))
+        .toList();
   }
 
   /// Close the underlying HTTP client. Safe to call multiple times.

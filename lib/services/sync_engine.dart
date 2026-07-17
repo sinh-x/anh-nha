@@ -276,6 +276,7 @@ class SyncEngine {
       existingIds = const {};
     }
 
+    var passUploaded = 0;
     for (final entry in pending) {
       if (existingIds.contains(entry.localId)) {
         _dedupSkipped++;
@@ -317,6 +318,7 @@ class SyncEngine {
           checksumBase64: entry.checksumBase64,
         );
         _uploaded++;
+        passUploaded++;
         await queueDb.markUploaded(entry.id!);
         // FR-5: only mark as verified when the server-returned checksum
         // matches the locally computed one. If the server omits the
@@ -361,6 +363,25 @@ class SyncEngine {
       onProgress?.call(summary);
     }
     await _refreshQueueStats();
+    // After draining, if any uploads succeeded in this pass, bump the local
+    // device's last-sync timestamp to "now" so the dashboard reflects the
+    // freshest sync (FR-6).
+    if (passUploaded > 0) {
+      await _bumpLocalLastSync();
+    }
+  }
+
+  Future<void> _bumpLocalLastSync() async {
+    try {
+      final deviceId = await authStore.deviceId();
+      final existing = await queueDb.deviceStats(deviceId);
+      if (existing == null) return;
+      await queueDb.upsertDeviceStats(existing.copyWith(
+        lastSyncAt: DateTime.now(),
+      ));
+    } on Exception {
+      // Best-effort.
+    }
   }
 
   /// Exponential backoff schedule: base * 2^(retry-1), capped at maxBackoff.
@@ -388,6 +409,32 @@ class SyncEngine {
       failed: _queue.failed,
       peerOnline: tailscale.isPeerOnline,
     );
+    await _recordLocalDeviceStats();
+  }
+
+  /// Update the local device's row in the `device_stats` table (FR-6) with
+  /// the latest pending count and total synced count. Called after every
+  /// queue stats refresh so the dashboard has fresh data without an extra
+  /// server round-trip.
+  Future<void> _recordLocalDeviceStats() async {
+    try {
+      final deviceId = await authStore.deviceId();
+      final label = await authStore.localDeviceLabel();
+      final syncedCount = await queueDb.syncedCount();
+      final existing = await queueDb.deviceStats(deviceId);
+      await queueDb.upsertDeviceStats(DeviceStats(
+        deviceId: deviceId,
+        deviceLabel: label ?? existing?.deviceLabel,
+        lastSyncAt: syncedCount > 0
+            ? (existing?.lastSyncAt ?? DateTime.now())
+            : existing?.lastSyncAt,
+        pendingCount: _queue.pending,
+        totalSyncedCount: syncedCount,
+        updatedAt: DateTime.now(),
+      ));
+    } on Exception {
+      // Stats tracking is best-effort; never block sync on it.
+    }
   }
 
   void _track(SyncProgress progress) {

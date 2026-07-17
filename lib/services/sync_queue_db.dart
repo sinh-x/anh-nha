@@ -264,6 +264,72 @@ class QueueStats {
   }
 }
 
+/// Per-device statistics tracked locally for the dashboard (FR-6).
+///
+/// Each row represents the last-known stats for a single device that has
+/// uploaded to this user's Immich library. The local device's row is
+/// updated after every sync pass; remote devices' rows are refreshed from
+/// server-side asset queries (see [DeviceRegistry]).
+class DeviceStats {
+  final String deviceId;
+  final String? deviceLabel;
+  final DateTime? lastSyncAt;
+  final int pendingCount;
+  final int totalSyncedCount;
+  final DateTime updatedAt;
+
+  const DeviceStats({
+    required this.deviceId,
+    this.deviceLabel,
+    this.lastSyncAt,
+    required this.pendingCount,
+    required this.totalSyncedCount,
+    required this.updatedAt,
+  });
+
+  factory DeviceStats.fromRow(Map<String, Object?> row) {
+    final lastSyncRaw = row['last_sync_at'] as int?;
+    return DeviceStats(
+      deviceId: row['device_id'] as String,
+      deviceLabel: row['device_label'] as String?,
+      lastSyncAt: lastSyncRaw == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(lastSyncRaw),
+      pendingCount: row['pending_count'] as int,
+      totalSyncedCount: row['total_synced_count'] as int,
+      updatedAt:
+          DateTime.fromMillisecondsSinceEpoch(row['updated_at'] as int),
+    );
+  }
+
+  Map<String, Object?> toRow() {
+    return {
+      'device_id': deviceId,
+      'device_label': deviceLabel,
+      'last_sync_at': lastSyncAt?.millisecondsSinceEpoch,
+      'pending_count': pendingCount,
+      'total_synced_count': totalSyncedCount,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    };
+  }
+
+  DeviceStats copyWith({
+    String? deviceLabel,
+    DateTime? lastSyncAt,
+    int? pendingCount,
+    int? totalSyncedCount,
+  }) {
+    return DeviceStats(
+      deviceId: deviceId,
+      deviceLabel: deviceLabel ?? this.deviceLabel,
+      lastSyncAt: lastSyncAt ?? this.lastSyncAt,
+      pendingCount: pendingCount ?? this.pendingCount,
+      totalSyncedCount: totalSyncedCount ?? this.totalSyncedCount,
+      updatedAt: DateTime.now(),
+    );
+  }
+}
+
 /// Persistent SQLite-backed sync queue (FR-3, NFR-6).
 ///
 /// The queue stores one row per local asset awaiting upload. It is the single
@@ -272,7 +338,7 @@ class QueueStats {
 /// DB stays small even with thousands of queued photos.
 class SyncQueueDb {
   static const _dbName = 'anh_nha_queue.db';
-  static const _schemaVersion = 2;
+  static const _schemaVersion = 3;
 
   Database? _db;
 
@@ -293,11 +359,15 @@ class SyncQueueDb {
   Future<void> _onCreate(Database db, int version) async {
     await _createQueueTable(db);
     await _createSyncedAssetsTable(db);
+    await _createDeviceStatsTable(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await _createSyncedAssetsTable(db);
+    }
+    if (oldVersion < 3) {
+      await _createDeviceStatsTable(db);
     }
   }
 
@@ -351,6 +421,23 @@ class SyncQueueDb {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_synced_deleted ON synced_assets(local_deleted)',
     );
+  }
+
+  /// Table of per-device sync statistics for the dashboard (FR-6). Each row
+  /// is keyed by the Immich `deviceId` (the stable per-install UUID sent on
+  /// every upload). The local device updates its own row after each sync
+  /// pass; remote devices' rows are refreshed from server-side asset counts.
+  Future<void> _createDeviceStatsTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS device_stats (
+        device_id TEXT PRIMARY KEY,
+        device_label TEXT,
+        last_sync_at INTEGER,
+        pending_count INTEGER NOT NULL DEFAULT 0,
+        total_synced_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
   }
 
   Database get _dbRef {
@@ -438,6 +525,7 @@ class SyncQueueDb {
   Future<void> clear() async {
     await _dbRef.delete('queue');
     await _dbRef.delete('synced_assets');
+    await _dbRef.delete('device_stats');
   }
 
   /// Aggregate counts by status, surfaced to the UI and foreground
@@ -511,6 +599,53 @@ class SyncQueueDb {
     final rows = await _dbRef
         .rawQuery('SELECT COUNT(*) AS c FROM synced_assets WHERE local_deleted = 1');
     return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  // --- Device stats (FR-6) ------------------------------------------------
+
+  /// Upsert a device's stats row. Creates the row if the device is new,
+  /// otherwise updates the existing row in place.
+  Future<void> upsertDeviceStats(DeviceStats stats) async {
+    await _dbRef.insert(
+      'device_stats',
+      stats.toRow(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Fetch stats for a single device, or null if not tracked yet.
+  Future<DeviceStats?> deviceStats(String deviceId) async {
+    final rows = await _dbRef.query(
+      'device_stats',
+      where: 'device_id = ?',
+      whereArgs: [deviceId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return DeviceStats.fromRow(rows.first);
+  }
+
+  /// Fetch all tracked device stats, ordered by most-recently-synced first.
+  Future<List<DeviceStats>> allDeviceStats() async {
+    final rows = await _dbRef.query(
+      'device_stats',
+      orderBy: 'last_sync_at DESC',
+    );
+    return rows.map(DeviceStats.fromRow).toList();
+  }
+
+  /// Remove a device's stats row (used by logout / account removal).
+  Future<void> clearDeviceStats(String deviceId) async {
+    await _dbRef.delete(
+      'device_stats',
+      where: 'device_id = ?',
+      whereArgs: [deviceId],
+    );
+  }
+
+  /// Remove all device stats rows (used by full logout / tests).
+  Future<void> clearAllDeviceStats() async {
+    await _dbRef.delete('device_stats');
   }
 
   /// Close the database. Safe to call multiple times.

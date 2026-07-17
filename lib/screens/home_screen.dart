@@ -87,6 +87,16 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('anh-nha'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.dashboard),
+            tooltip: 'Dashboard',
+            onPressed: () => Navigator.of(context).pushNamed('/dashboard'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.manage_accounts),
+            tooltip: 'Accounts',
+            onPressed: () => Navigator.of(context).pushNamed('/accounts'),
+          ),
+          IconButton(
             icon: const Icon(Icons.cleaning_services),
             tooltip: 'Space saver',
             onPressed: () => Navigator.of(context).pushNamed('/space-saver'),

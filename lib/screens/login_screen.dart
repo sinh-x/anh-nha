@@ -54,7 +54,14 @@ class _LoginScreenState extends State<LoginScreen> {
       await widget.authStore.saveLogin(result, creds.serverUrl.trim());
       widget.onLoginSuccess();
       if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/home');
+        // Pop back to home if a previous route exists (add-account flow),
+        // otherwise replace the login route.
+        final canPop = Navigator.of(context).canPop();
+        if (canPop) {
+          Navigator.of(context).popUntil(ModalRoute.withName('/home'));
+        } else {
+          Navigator.of(context).pushReplacementNamed('/home');
+        }
       }
     } on ImmichApiException catch (e) {
       setState(() => _error = e.message);
