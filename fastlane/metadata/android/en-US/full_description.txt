@@ -1,0 +1,20 @@
+anh-nha (ảnh nhà)
+
+A custom Android photo sync client for self-hosted Immich servers, accessible via Tailscale VPN.
+
+Features:
+- Auto-upload photos to your Immich server over WiFi when Tailscale is connected
+- Free local storage after verified sync (safe delete of synced photos)
+- Visible offline sync queue with retry
+- Multi-device family dashboard showing per-device sync status
+- Backup integrity verification (checksum comparison)
+- Works without Google Play Services on Android 9+ (API 28)
+
+Privacy:
+- No telemetry, no analytics
+- No data ever leaves your Tailscale network
+- No dependency on Google Play Services
+
+This app is designed for personal/family use with a self-hosted Immich server. It is not affiliated with the Immich project.
+
+Distribution: F-Droid and direct APK.

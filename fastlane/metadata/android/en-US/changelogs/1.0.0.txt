@@ -1,0 +1,7 @@
+- Auto-upload photos to Immich server over WiFi when Tailscale is connected
+- Free local storage after verified sync
+- Visible offline sync queue with retry
+- Multi-device family dashboard
+- Backup integrity verification (checksum comparison)
+- Works without Google Play Services on Android 9+
+- No telemetry, no analytics — data never leaves your Tailscale network

@@ -1,0 +1,1 @@
+anh-nha — Custom Android photo sync client for self-hosted Immich server. Auto-upload over WiFi/Tailscale, offline queue, space-saver, multi-device dashboard, backup verification. Android 9+, no Google Play Services, F-Droid distribution.
